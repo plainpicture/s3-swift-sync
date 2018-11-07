@@ -1,11 +1,7 @@
 #!/usr/bin/ruby
 
-require "rubygems"
+require "bundler/setup"
 require "fileutils"
-require "bundler"
-
-FileUtils.cd(File.dirname(__FILE__)) { Bundler.setup }
-
 require "swift_client"
 require "aws-sdk"
 require "dalli"
@@ -28,16 +24,9 @@ module Retry
 end
 
 class String
-  if RUBY_VERSION <= '1.9'
-    def previous!
-      self[-1] -= 1
-      self
-    end 
-  else
-    def previous!
-      self[-1] = (self[-1].ord - 1).chr
-      self
-    end 
+  def previous!
+    self[-1] = (self[-1].ord - 1).chr
+    self
   end 
 
   def previous
@@ -79,8 +68,8 @@ class S3SwiftSync < Thor
   desc "sync", "sync swift containers to s3 bucket"
 
   def sync
-    swift_client = SwiftClient.new(**config.swift, :cache_store => Dalli::Client.new(options.memcache))
-    s3_bucket = Aws::S3::Resource.new(:client => Aws::S3::Client.new(config.s3)).bucket(options.bucket)
+    swift_client = SwiftClient.new(**config.swift.to_h, :cache_store => Dalli::Client.new(options.memcache))
+    s3_bucket = Aws::S3::Resource.new(:client => Aws::S3::Client.new(config.s3.to_h)).bucket(options.bucket)
 
     sliding_window = SlidingWindow.new(swift_client, options.container)
 
