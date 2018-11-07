@@ -1,0 +1,110 @@
+#!/usr/bin/ruby
+
+require "rubygems"
+require "fileutils"
+require "bundler"
+
+FileUtils.cd(File.dirname(__FILE__)) { Bundler.setup }
+
+require "swift_client"
+require "aws-sdk"
+require "dalli"
+require "hashr"
+require "thor"
+require "yaml"
+
+module Retry
+  def self.task(num = 3, delay = 30) 
+    num.times do |i| 
+      begin
+        return yield
+      rescue => e
+        raise e if i + 1 == num 
+
+        sleep delay
+      end 
+    end 
+  end 
+end
+
+class String
+  if RUBY_VERSION <= '1.9'
+    def previous!
+      self[-1] -= 1
+      self
+    end 
+  else
+    def previous!
+      self[-1] = (self[-1].ord - 1).chr
+      self
+    end 
+  end 
+
+  def previous
+    dup.previous!
+  end 
+end
+
+class SlidingWindow
+  attr_accessor :swift_client, :container, :window
+
+  def initialize(swift_client, container)
+    self.swift_client = swift_client
+    self.container = container
+    self.window = nil 
+  end 
+
+  def [](key)
+    slide_to key 
+
+    window[key]
+  end 
+
+  def slide_to(key)
+    return if window && window.empty?
+    return if window && window.keys.last >= key 
+
+    puts "Slide to: #{key}"
+
+    self.window = swift_client.get_objects(container, :marker => key.previous).each_with_object({}) { |object, hash| hash[object["name"]] = object }
+  end 
+end
+
+class S3SwiftSync < Thor
+  class_option :config, :required => true
+  class_option :container, :required => true
+  class_option :bucket, :required => true
+  class_option :memcache, :default => "127.0.0.1:11211"
+
+  desc "sync", "sync swift containers to s3 bucket"
+
+  def sync
+    swift_client = SwiftClient.new(**config.swift, :cache_store => Dalli::Client.new(options.memcache))
+    s3_bucket = Aws::S3::Resource.new(:client => Aws::S3::Client.new(config.s3)).bucket(options.bucket)
+
+    sliding_window = SlidingWindow.new(swift_client, options.container)
+
+    s3_bucket.objects(:prefix => "#{options.container}/").each do |s3_object|
+      relative_object_name = s3_object.key.gsub(/^[^\/]+\//, "")
+
+      swift_object = sliding_window[relative_object_name]
+
+      if swift_object.nil? || s3_object.etag.gsub(/"/, "") != swift_object["hash"]
+        puts "#{Time.now}: Uploading #{relative_object_name} [container '#{options.container}', #{s3_object.size} bytes]"
+
+        Retry.task { swift_client.put_object relative_object_name, s3_bucket.object(s3_object.key).get.body.read.force_encoding(Encoding::BINARY), options.container }
+      else
+        puts "#{Time.now}: Skipping #{relative_object_name} [container '#{options.container}']"
+      end
+    end
+  end
+
+  private
+
+  def config
+    @config ||= Hashr.new(YAML.load_file(options.config))
+  end
+end
+
+S3SwiftSync.start ARGV
+
